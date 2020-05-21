@@ -1,0 +1,234 @@
+USE stockmarket;
+
+delimiter //
+DROP PROCEDURE IF EXISTS `add_new_trader`//
+CREATE PROCEDURE `add_new_trader`(fn varchar(50), ls varchar(50), un varchar(50), email varchar(120), phone bigint, passward varchar(50))
+BEGIN
+	INSERT INTO trader (firstname, lastname, username, email, phone, passward)
+	VALUES (fn, ls, un, email, phone, passward);
+END//
+
+
+DROP PROCEDURE IF EXISTS `change_passward`//
+CREATE PROCEDURE `change_passward`(t_id bigint, passward varchar(50))
+BEGIN
+	UPDATE trader SET passward = passward WHERE id = t_id;
+END//
+
+DROP PROCEDURE IF EXISTS `add_new_item` //
+CREATE PROCEDURE `add_new_item`(name varchar(50), code varchar(50), is_active bit, details varchar(255))
+BEGIN
+	INSERT INTO item (name, code, is_active, details)
+	VALUES (name, code, is_active, details);
+END//
+
+
+DROP PROCEDURE IF EXISTS add_offer//
+CREATE PROCEDURE add_offer(trader_id bigint, item_id bigint, quantity bigint, buy bit, price float, OUT tran_result varchar(100))
+BEGIN
+	DECLARE match_id bigint;
+	DECLARE last_offer_id bigint;
+	DECLARE buyer_id bigint;
+	DECLARE buyer_offer_id bigint;
+	DECLARE seller_id bigint;
+	DECLARE seller_offer_id bigint;
+	DECLARE last_transaction_type bigint;
+	DECLARE trade_day date;
+	DECLARE check_result bit DEFAULT 1;
+	DECLARE `_rollback` int DEFAULT 0;
+	DECLARE tran_result varchar(200);
+	DECLARE code varchar(100);
+	DECLARE error_string varchar(100);
+	DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+	BEGIN
+		SET `_rollback` = 2;
+		GET stacked DIAGNOSTICS CONDITION 1
+		code = returned_sqlstate, error_string = message_text;
+		SET tran_result := concat('Code: ', code, ' ,Text: ', error_string);
+	END;
+	SET autocommit=0;
+	START TRANSACTION;
+		SET last_transaction_type = buy;
+		IF last_transaction_type = 0 THEN
+			SET check_result = check_seller_inventory(trader_id, item_id, quantity);
+			IF check_result = 0 THEN
+				SET `_rollback` = 1;
+			END IF;
+			UPDATE current_inventory c SET c.quantity = c.quantity - quantity WHERE c.trader_id = trader_id AND c.item_id = item_id;
+		END IF;
+
+		INSERT INTO offer(trader_id, item_id, quantity, buy, price)
+			VALUES(trader_id, item_id, quantity, buy, price);
+		SET trade_day = CURDATE();
+		SET last_offer_id = LAST_INSERT_ID();
+		SET match_id = (SELECT find_a_match(last_offer_id));
+		-- SET match_available_quantity = (SELECT quantity FROM offer WHERE id = match_id);
+		IF match_id <> 0 THEN
+			CALL find_buyer_seller(last_transaction_type, last_offer_id, match_id,
+									@buyer_id, @buyer_offer_id, @buyer_offer_quantity, @seller_id, @seller_offer_id, @seller_offer_quantity);
+			CALL update_quantities(@buyer_id, @seller_id, @buyer_offer_quantity, @seller_offer_quantity,
+									@buyer_quantity_left, @seller_quantity_left, @buyer_active, @seller_active, @deal_quantity);
+			CALL update_buyer_inventory(@buyer_id, item_id, @deal_quantity);
+			CALL update_report(item_id, trade_day, price, @deal_quantity);
+			INSERT INTO trades(item_id, buyer_id, buyer_offer_id ,seller_id, seller_offer_id, trade_price , quantity) VALUES
+			 					(item_id, @buyer_id, @buyer_offer_id, @seller_id, @seller_offer_id, price, @deal_quantity);
+			CALL update_offer(@buyer_offer_id, @seller_offer_id, @buyer_active, @seller_active, @buyer_quantity_left, @seller_quantity_left);
+			INSERT INTO offer_archive SELECT * FROM offer o WHERE o.is_active = 0;
+			DELETE FROM offer o WHERE o.is_active = 0;
+		END IF;
+	IF `_rollback` = 1 THEN
+		SELECT `Not enough items in inventory! ROLLBACK..`;
+		ROLLBACK;
+	ELSEIF `_rollback` = 2 THEN
+		SELECT tran_result;
+		ROLLBACK;
+	ELSE
+		COMMIT;
+	END IF;
+END//
+
+
+DROP PROCEDURE IF EXISTS update_offer//
+CREATE PROCEDURE update_offer(buyer_offer_id bigint, seller_offer_id bigint, buyer_active bit, seller_active bit, buyer_q bigint, seller_q bigint)
+BEGIN
+	UPDATE offer o SET is_active = buyer_active, quantity = buyer_q WHERE o.id = buyer_offer_id;
+	UPDATE offer o SET is_active = seller_active, quantity = seller_q WHERE o.id = seller_offer_id;
+END//
+
+
+DROP FUNCTION IF EXISTS find_a_match//
+CREATE FUNCTION find_a_match(offer_id bigint)
+RETURNS bigint READS SQL DATA
+BEGIN
+	DECLARE match_id bigint;
+	DECLARE match_control bigint;
+ 	SET match_id = 0;
+	SELECT trader_id, item_id, price, buy INTO @trader_id, @item_id, @price, @buy FROM offer o WHERE id = offer_id;
+	IF @buy = 1 THEN
+		SET match_control := (SELECT id FROM offer o WHERE o.item_id = @item_id AND o.price = @price AND o.buy = 0 AND o.trader_id <> @trader_id ORDER BY offer_time LIMIT 1);
+		IF match_control THEN
+			SET match_id = match_control;
+		END IF;
+	ELSEIF @buy = 0 THEN
+		SET match_id := (SELECT id FROM offer o WHERE o.item_id = @item_id AND o.price = @price AND o.buy = 1 AND o.trader_id <> @trader_id ORDER BY offer_time LIMIT 1);
+		IF match_control THEN
+			SET match_id = match_control;
+		END IF;
+	END IF;
+	RETURN match_id;
+END//
+
+
+DROP PROCEDURE IF EXISTS find_buyer_seller//
+CREATE PROCEDURE find_buyer_seller(tran_type bit, last_offer_id bigint, match_id bigint,
+					OUT buyer_id bigint, out buyer_offer_id bigint, OUT buyer_offer_quantity bigint, OUT seller_id bigint, OUT seller_offer_id bigint, OUT seller_offer_quantity bigint)
+BEGIN
+	CASE
+		WHEN tran_type = 1 THEN
+		SET buyer_offer_id = last_offer_id;
+		SET seller_offer_id = (SELECT id FROM offer o WHERE o.id = match_id);
+		SET buyer_id = (SELECT trader_id FROM offer o WHERE o.id = buyer_offer_id);
+		SET seller_id = (SELECT trader_id FROM offer o WHERE o.id = seller_offer_id);
+		WHEN tran_type = 0 THEN
+		SET seller_offer_id = last_offer_id;
+		SET buyer_offer_id = (SELECT id FROM offer o WHERE o.id = match_id);
+		SET seller_id = (SELECT trader_id FROM offer o WHERE o.id = seller_offer_id);
+		SET buyer_id = (SELECT trader_id FROM offer o WHERE o.id = buyer_offer_id);
+	END CASE;
+		SET buyer_offer_quantity = (SELECT quantity FROM offer o WHERE o.id = buyer_offer_id);
+		SET seller_offer_quantity = (SELECT quantity FROM offer o WHERE o.id = seller_offer_id);
+END//
+
+
+DROP PROCEDURE IF EXISTS update_buyer_inventory//
+CREATE PROCEDURE update_buyer_inventory(buyer_id bigint, item_id bigint, quantity bigint)
+BEGIN
+	DECLARE item_in_inventory bigint;
+	SET item_in_inventory = (SELECT item_id FROM current_inventory ci WHERE ci.item_id = item_id AND ci.trader_id = buyer_id);
+	IF item_in_inventory THEN
+		UPDATE current_inventory c SET c.quantity = c.quantity + quantity WHERE trader_id = buyer_id;
+	ELSE
+		INSERT INTO current_inventory(trader_id, item_id, quantity) VALUES (buyer_id, item_id, quantity);
+	END IF;
+END//
+
+
+DROP FUNCTION IF EXISTS check_seller_inventory//
+CREATE FUNCTION check_seller_inventory(trader_id bigint, item_id bigint, in_quantity bigint)
+RETURNS bit READS SQL DATA
+BEGIN
+	DECLARE items_in_inventory bigint;
+	DECLARE check_result bit;
+	SET items_in_inventory = (SELECT quantity FROM trader_inventory t WHERE t.trader_id = trader_id and t.item_id = item_id);
+	IF items_in_inventory < in_quantity OR items_in_inventory IS NULL THEN
+		SET check_result = 0;
+	ELSEIF items_in_inventory = in_quantity OR items_in_inventory > in_quantity THEN
+		SET check_result = 1;
+	END IF;
+	RETURN check_result;
+END//
+
+
+DROP PROCEDURE IF EXISTS update_report//
+CREATE PROCEDURE update_report(item_id bigint, trade_day date, price float, quantity bigint)
+BEGIN
+	DECLARE not_first_trade bigint;
+	DECLARE new_max_price float;
+	DECLARE new_min_price float;
+	DECLARE new_total_amt float;
+	DECLARE new_quantity bigint;
+	DECLARE new_avr_price float;
+
+	SET not_first_trade = (SELECT item_id FROM report r WHERE r.item_id = item_id AND r.trade_day = trade_day);
+	IF not_first_trade THEN
+		SELECT max_price, min_price, total_amt, quantity INTO @old_max_price, @old_min_price, @old_total_amt, @old_quantity FROM report r
+			WHERE r.item_id = item_id AND r.trade_day = trade_day;
+		IF @old_max_price < price THEN
+			SET new_max_price = price;
+		ELSE
+			SET new_max_price = @old_max_price;
+		END IF;
+		IF @old_min_price > price THEN
+			SET new_min_price = price;
+		ELSE
+			SET new_min_price = @old_min_price;
+		END IF;
+		SET new_quantity = @old_quantity + quantity;
+		SET new_total_amt = (@old_total_amt * @old_quantity) + (price * quantity);
+		SET new_avr_price = new_total_amt / new_quantity;
+		UPDATE report r SET r.last_price = price, max_price = new_max_price, r.min_price = new_min_price,
+							r.total_amt = new_total_amt, r.quantity = new_quantity, r.avr_price = new_avr_price WHERE
+							r.item_id = item_id AND r.trade_day = trade_day;
+	ELSE
+		INSERT INTO report(item_id, trade_day, first_price, last_price, max_price, min_price, total_amt, quantity, avr_price) VALUES
+			(item_id, trade_day, price, price, price, price, price, quantity, price);
+	END IF;
+END//
+
+
+DROP PROCEDURE IF EXISTS update_quantities//
+CREATE PROCEDURE update_quantities(buyer_id bigint, seller_id bigint, buyer_offer_quantity bigint, seller_offer_quantity bigint,
+									OUT buyer_quantity_left bigint, out seller_quantity_left bigint, OUT buyer_active bit, OUT seller_active bit, OUT deal_quantity bigint)
+BEGIN
+	CASE
+		WHEN buyer_offer_quantity > seller_offer_quantity THEN
+		SET buyer_quantity_left = buyer_offer_quantity - seller_offer_quantity;
+		SET seller_quantity_left = seller_offer_quantity;
+		SET buyer_active = 1;
+		SET seller_active = 0;
+		SET deal_quantity = seller_offer_quantity;
+		WHEN seller_offer_quantity > buyer_offer_quantity THEN
+		SET seller_quantity_left = seller_offer_quantity - buyer_offer_quantity;
+		SET buyer_quantity_left = buyer_offer_quantity;
+		SET buyer_active = 0;
+		SET seller_active = 1;
+		SET deal_quantity = buyer_offer_quantity;
+		WHEN seller_offer_quantity = buyer_offer_quantity THEN
+		SET seller_quantity_left = seller_offer_quantity;
+		SET buyer_quantity_left = buyer_offer_quantity;
+		SET buyer_active = 0;
+		SET seller_active = 0;
+		SET deal_quantity = buyer_offer_quantity;
+	END CASE;
+END//
+delimiter ;

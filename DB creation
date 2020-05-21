@@ -1,0 +1,103 @@
+DROP DATABASE IF EXISTS StockMarket;
+CREATE DATABASE StockMarket;
+USE stockmarket;
+
+DROP TABLE IF EXISTS trader;
+CREATE TABLE trader(
+	id SERIAL PRIMARY KEY,
+	firstname varchar(50) NOT NULL,
+	lastname varchar(50) NOT NULL,
+	username varchar(50) NOT NULL UNIQUE,
+	email varchar(120) UNIQUE NOT NULL,
+	phone bigint UNIQUE NOT NULL,
+	passward varchar(50) NOT NULL,
+	time_registered timestamp DEFAULT now(),
+	INDEX trader_phone_idx(phone),
+	INDEX trader_email_idx(email),
+	INDEX trader_username_idx(username)
+);
+
+DROP TABLE IF EXISTS item;		-- whether or not the item is available for trade
+CREATE TABLE item(
+	id SERIAL PRIMARY KEY,
+	name varchar(64) UNIQUE NOT NULL,
+	code varchar(16) UNIQUE NOT NULL,
+	is_active bit DEFAULT 1,
+	details text
+);
+
+DROP TABLE IF EXISTS offer;		-- to collect available offers for later used to find a match in trdae table
+CREATE TABLE offer(
+	id SERIAL PRIMARY KEY,
+	trader_id bigint UNSIGNED NOT NULL,
+	item_id bigint UNSIGNED NOT NULL,
+	quantity bigint NOT NULL DEFAULT 1,
+	buy bit DEFAULT 1,		-- buy = 1, sell = 0
+	price float UNSIGNED NOT NULL,
+	offer_time timestamp DEFAULT now(),
+	is_active bit DEFAULT 1,
+
+	FOREIGN KEY (trader_id) REFERENCES trader(id),
+	FOREIGN KEY (item_id) REFERENCES item(id),
+	INDEX offer_trader_id_item_id_price(trader_id, item_id, price)
+);
+
+
+DROP TABLE IF EXISTS offer_archive;
+CREATE TABLE offer_archive(
+	offer_id bigint UNSIGNED NOT NULL,
+	trader_id bigint UNSIGNED NOT NULL,
+	item_id bigint UNSIGNED NOT NULL,
+	quantity bigint NOT NULL,
+	buy bit NOT NULL,
+	price float UNSIGNED NOT NULL,
+	offer_time timestamp,
+	is_active bit NOT NULL
+) engine=archive;
+
+DROP TABLE IF EXISTS trades;		-- to find a match
+CREATE TABLE trades(
+	id SERIAL PRIMARY KEY,
+	item_id bigint UNSIGNED NOT NULL,
+	buyer_id bigint UNSIGNED NOT NULL,
+	buyer_offer_id bigint UNSIGNED NOT NULL,
+	seller_id bigint UNSIGNED NOT NULL,
+	seller_offer_id bigint UNSIGNED NOT NULL,
+	trade_price float NOT NULL,
+	quantity bigint UNSIGNED NOT NULL,
+	trade_ts timestamp DEFAULT now(),
+
+	FOREIGN KEY (item_id) REFERENCES item(id),
+	FOREIGN KEY (buyer_id) REFERENCES trader(id),
+	FOREIGN KEY (seller_id) REFERENCES trader(id)
+);
+
+
+DROP TABLE IF EXISTS current_inventory;		-- to chech whether or not the seller has the quantity he is selling
+CREATE TABLE current_inventory(
+	id SERIAL PRIMARY KEY,
+	trader_id bigint UNSIGNED,
+	item_id bigint UNSIGNED,
+	quantity bigint UNSIGNED,
+
+	FOREIGN KEY (trader_id) REFERENCES trader(id),
+	FOREIGN KEY (item_id) REFERENCES item(id)
+);
+
+
+DROP TABLE IF EXISTS report;		-- to record max, min, first and last prices of the day
+CREATE TABLE report(
+	id SERIAL PRIMARY KEY,
+	item_id bigint UNSIGNED NOT NULL,
+	trade_day date NOT NULL,
+	first_price float DEFAULT 0,
+	last_price float DEFAULT 0,
+	max_price float DEFAULT 0,
+	min_price float DEFAULT 0,
+	total_amt float DEFAULT 0,		-- total price amount paid for the item
+	quantity bigint UNSIGNED NOT NULL,
+	avr_price float DEFAULT 0,
+	INDEX report_item_id_trade_day_idx(item_id, trade_day),
+
+	FOREIGN KEY (item_id) REFERENCES item(id)
+);

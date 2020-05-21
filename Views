@@ -1,0 +1,21 @@
+USE stockmarket;
+
+CREATE OR REPLACE VIEW trader_inventory (trader_id, item_id , item_name, quantity) AS
+SELECT c.trader_id, c.item_id, i.name, c.quantity FROM current_inventory c
+JOIN
+item i ON c.item_id = i.id;
+
+
+CREATE OR REPLACE VIEW company_volume (company_name, buy, sell) AS
+SELECT i.name, (SELECT count(o.buy) FROM offer o WHERE o.buy = 1),
+				(SELECT count(o.buy) FROM offer o WHERE o.buy = 0) FROM item i
+JOIN
+offer o ON i.id = o.item_id
+GROUP BY i.id;
+
+CREATE OR REPLACE VIEW trader_history (trader_id, trader_fullname, item_id, Item_name, trades) AS
+SELECT t.id, CONCAT(t.lastname, ' ', t.firstname), ts.item_id, i.name, ts.quantity FROM trader t
+JOIN
+trades ts ON (t.id = ts.buyer_id) OR (t.id = ts.seller_id)
+JOIN
+item i ON i.id = ts.item_id;
